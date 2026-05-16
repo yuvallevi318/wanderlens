@@ -1,0 +1,1608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WanderLens – Asia Photo Atlas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap" rel="stylesheet" />
+  <style>@keyframes wls{0%{left:-50%}100%{left:150%}}</style>
+</head>
+<body style="margin:0;background:#0A0908;">
+
+<div id="root">
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#0A0908;gap:1.5rem;">
+    <div style="font-family:'Cormorant Garamond',serif;font-size:1.4rem;letter-spacing:0.35em;color:#C9A84C;text-transform:uppercase;">WanderLens</div>
+    <div style="width:80px;height:1px;background:rgba(201,168,76,0.2);position:relative;overflow:hidden;">
+      <div style="position:absolute;top:0;left:-50%;width:50%;height:100%;background:#C9A84C;animation:wls 1.2s ease-in-out infinite;"></div>
+    </div>
+    <div style="font-family:sans-serif;font-size:0.6rem;letter-spacing:0.3em;color:#504840;text-transform:uppercase;">Loading</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+
+<script>
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ── Bedrock proxy URL ──────────────────────────────────────────────────────── */
+const BEDROCK_PROXY_URL = "https://xvimruudj0.execute-api.us-east-1.amazonaws.com/analyze";
+
+/* ── Backend URL — set to your Load Balancer DNS or EC2 public IP ───────────
+   e.g. "http://wanderlens-alb-123456.us-east-1.elb.amazonaws.com"
+   ─────────────────────────────────────────────────────────────────────────── */
+const BACKEND_URL = "https://d3w2qxikfllmgr.cloudfront.net";
+
+/* ── Journey API helpers ─────────────────────────────────────────────────── */
+async function apiLoadJourney(userName) {
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/journey/${encodeURIComponent(userName)}`);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch (e) { console.warn("Journey load failed, using localStorage", e); return null; }
+}
+async function apiSaveEntry(entry) {
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/journey`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(entry)
+    });
+    if (!r.ok) throw new Error(r.status);
+    return (await r.json()).id;
+  } catch (e) { console.warn("Journey save failed", e); return null; }
+}
+async function apiTogglePublic(id, isPublic) {
+  try {
+    await fetch(`${BACKEND_URL}/api/journey/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isPublic })
+    });
+  } catch (e) { console.warn("Toggle public failed", e); }
+}
+async function apiReorder(userName, order) {
+  try {
+    await fetch(`${BACKEND_URL}/api/journey/reorder`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userName, order })
+    });
+  } catch (e) { console.warn("Reorder save failed", e); }
+}
+async function apiLoadCommunity(excludeUser) {
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/community?exclude=${encodeURIComponent(excludeUser)}`);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch (e) { console.warn("Community load failed", e); return []; }
+}
+
+async function callClaude({ messages, max_tokens = 600 }) {
+  const resp = await fetch(BEDROCK_PROXY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, max_tokens })
+  });
+  if (!resp.ok) throw new Error(`Proxy error ${resp.status}`);
+  const data = await resp.json();
+  return data.content?.find(b => b.type === "text")?.text || "";
+}
+
+const DESTINATIONS = [{
+  id: "thailand", name: "Thailand", tag: "Land of Smiles", accent: "#D4943A"
+}, {
+  id: "vietnam", name: "Vietnam", tag: "The Hidden Gem", accent: "#C94040"
+}, {
+  id: "japan", name: "Japan", tag: "Rising Sun", accent: "#C95070"
+}, {
+  id: "korea", name: "Korea", tag: "Morning Calm", accent: "#4A80C9"
+}, {
+  id: "taiwan", name: "Taiwan", tag: "Heart of Asia", accent: "#3AC984"
+}, {
+  id: "hongkong", name: "Hong Kong", tag: "Asia's World City", accent: "#C9803A"
+}, {
+  id: "china", name: "China", tag: "Middle Kingdom", accent: "#C9354A"
+}, {
+  id: "singapore", name: "Singapore", tag: "The Lion City", accent: "#C93A7A"
+}, {
+  id: "malaysia", name: "Malaysia", tag: "Truly Asia", accent: "#3A9CC9"
+}, {
+  id: "indonesia", name: "Indonesia", tag: "Emerald Equator", accent: "#C97A3A"
+}, {
+  id: "philippines", name: "Philippines", tag: "Pearl of the Orient", accent: "#3A6FC9"
+}, {
+  id: "cambodia", name: "Cambodia", tag: "Kingdom of Wonder", accent: "#8C3AC9"
+}, {
+  id: "india", name: "India", tag: "Incredible India", accent: "#C9873A"
+}];
+const ISO = {
+  thailand: 764, vietnam: 704, japan: 392, korea: 410,
+  taiwan: 158, hongkong: 344, china: 156, singapore: 702,
+  malaysia: 458, indonesia: 360, philippines: 608, cambodia: 116, india: 356
+};
+
+async function resizeToThumbnail(dataURL, size = 400) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ratio = Math.min(size / img.width, size / img.height);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.88));
+    };
+    img.src = dataURL;
+  });
+}
+
+async function compressForAPI(dataURL, maxPx = 1024) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ratio = Math.min(maxPx / img.width, maxPx / img.height, 1);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      const compressed = canvas.toDataURL("image/jpeg", 0.82);
+      resolve({ data: compressed.split(",")[1], type: "image/jpeg" });
+    };
+    img.src = dataURL;
+  });
+}
+function useTopoReady() {
+  const [ready, setReady] = useState(typeof window !== "undefined" && !!window.topojson);
+  useEffect(() => {
+    if (window.topojson) {
+      setReady(true);
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js";
+    s.onload = () => setReady(true);
+    document.head.appendChild(s);
+  }, []);
+  return ready;
+}
+
+/* ── CountryMap ───────────────────────────────────────────────────────────── */
+function CountryMap({
+  destId,
+  world
+}) {
+  const divRef = useRef(null);
+  useEffect(() => {
+    const div = divRef.current;
+    if (!div || !world || !window.topojson) return;
+    const draw = () => {
+      const w = div.offsetWidth,
+        h = div.offsetHeight;
+      if (!w || !h) return;
+      d3.select(div).select("svg").remove();
+      const topo = window.topojson;
+      const isoCode = ISO[destId];
+      const countries = topo.feature(world, world.objects.countries);
+      const target = countries.features.find(f => +f.id === isoCode);
+      let view = target;
+      if (!view && destId === "hongkong") {
+        view = {
+          type: "Feature",
+          geometry: {
+            type: "Polygon",
+            coordinates: [[[113.6, 22.0], [114.6, 22.0], [114.6, 22.8], [113.6, 22.8], [113.6, 22.0]]]
+          }
+        };
+      }
+      if (!view) return;
+      const pad = {
+        thailand: 14,
+        vietnam: 18,
+        japan: 10,
+        korea: 24,
+        taiwan: 40,
+        hongkong: 60
+      }[destId] ?? 16;
+      const proj = d3.geoMercator().fitExtent([[pad, pad], [w - pad, h - pad]], view);
+      const path = d3.geoPath().projection(proj);
+      const svg = d3.select(div).append("svg").style("position", "absolute").style("inset", "0").attr("width", "100%").attr("height", "100%").style("overflow", "hidden");
+      svg.selectAll("path.dim").data(countries.features.filter(f => +f.id !== isoCode)).join("path").attr("class", "wl-map-dim").attr("d", path);
+      if (target) {
+        svg.append("path").datum(target).attr("class", "wl-map-hi").attr("d", path);
+      } else if (destId === "hongkong") {
+        const pt = proj([114.17, 22.32]);
+        if (pt) svg.append("circle").attr("cx", pt[0]).attr("cy", pt[1]).attr("r", 6).attr("class", "wl-map-hi");
+      }
+    };
+    draw();
+    const t = setTimeout(draw, 120);
+    const obs = new ResizeObserver(draw);
+    obs.observe(div);
+    return () => {
+      clearTimeout(t);
+      obs.disconnect();
+    };
+  }, [destId, world]);
+  return /*#__PURE__*/React.createElement("div", {
+    ref: divRef,
+    style: {
+      position: "absolute",
+      inset: 0
+    }
+  });
+}
+const COUNTRY_MAP = {
+  thailand: "thailand", "kingdom of thailand": "thailand", "thai": "thailand",
+  vietnam: "vietnam", "viet nam": "vietnam", "socialist republic of vietnam": "vietnam",
+  japan: "japan", "nihon": "japan", "nippon": "japan",
+  korea: "korea", "south korea": "korea", "republic of korea": "korea", "rok": "korea",
+  taiwan: "taiwan", "republic of china": "taiwan", "taiwan province of china": "taiwan",
+  "chinese taipei": "taiwan", "formosa": "taiwan",
+  "hong kong": "hongkong", "hongkong": "hongkong", "hong kong sar": "hongkong",
+  "hong kong special administrative region": "hongkong", "hksar": "hongkong",
+  china: "china", "people's republic of china": "china", "prc": "china", "mainland china": "china",
+  singapore: "singapore", "republic of singapore": "singapore",
+  malaysia: "malaysia",
+  indonesia: "indonesia", "bali": "indonesia", "republic of indonesia": "indonesia",
+  philippines: "philippines", "republic of the philippines": "philippines", "pilipinas": "philippines",
+  cambodia: "cambodia", "kingdom of cambodia": "cambodia",
+  india: "india", "republic of india": "india", "bharat": "india"
+};
+
+function resolveDestId(countryStr) {
+  if (!countryStr) return null;
+  const c = countryStr.toLowerCase().trim().replace(/[,\.]/g, "");
+  if (COUNTRY_MAP[c]) return COUNTRY_MAP[c];
+  for (const [key, id] of Object.entries(COUNTRY_MAP)) {
+    if (c.includes(key) || key.includes(c)) return id;
+  }
+  return null;
+}
+const COUNTRY_CENTERS = {
+  thailand:    { lat: 15.87, lng: 100.99 },
+  vietnam:     { lat: 14.06, lng: 108.28 },
+  japan:       { lat: 36.20, lng: 138.25 },
+  korea:       { lat: 35.91, lng: 127.77 },
+  taiwan:      { lat: 23.70, lng: 120.96 },
+  hongkong:    { lat: 22.32, lng: 114.17 },
+  china:       { lat: 35.86, lng: 104.19 },
+  singapore:   { lat: 1.35,  lng: 103.82 },
+  malaysia:    { lat: 4.21,  lng: 108.96 },
+  indonesia:   { lat: -0.79, lng: 113.92 },
+  philippines: { lat: 12.88, lng: 121.77 },
+  cambodia:    { lat: 12.57, lng: 104.99 },
+  india:       { lat: 20.59, lng: 78.96  }
+};
+const SEEDED_COMMUNITY = [
+  { thumbnail: "https://images.unsplash.com/photo-1513407030348-c983a97b98d8?w=400&q=80&fit=crop", city: "Shibuya", country: "Japan", funFact: "Up to 3,000 people cross Shibuya Scramble Crossing in a single green-light cycle — making it the busiest pedestrian intersection on Earth." },
+  { thumbnail: "https://images.unsplash.com/photo-1528181304800-259b08848526?w=400&q=80&fit=crop", city: "Bangkok", country: "Thailand", funFact: "The Grand Palace was built in 1782 and the Emerald Buddha inside it is only 66cm tall — yet it is Thailand's most sacred religious object." },
+  { thumbnail: "https://images.unsplash.com/photo-1565967511849-76a60a516170?w=400&q=80&fit=crop", city: "Singapore", country: "Singapore", funFact: "The Merlion was designed in 1964 by Fraser Brunner for the Singapore Tourist Promotion Board — the lion head represents Singapore's origins as Singapura, meaning Lion City." },
+  { thumbnail: "https://images.unsplash.com/photo-1536599018102-9f803c140fc1?w=400&q=80&fit=crop", city: "Hong Kong", country: "Hong Kong", funFact: "Hong Kong's famous double-decker trams have been running since 1904 and are still one of the cheapest ways to cross Hong Kong Island at around HK$3 a ride." },
+  { thumbnail: "https://images.unsplash.com/photo-1540611025311-01df3cef54b5?w=400&q=80&fit=crop", city: "Hội An", country: "Vietnam", funFact: "Hoi An's silk lanterns are handmade by local families and the town releases hundreds of them onto the Thu Bon River every full moon." },
+  { thumbnail: "https://images.unsplash.com/photo-1538485399081-7191377e8241?w=400&q=80&fit=crop", city: "Seoul", country: "Korea", funFact: "Visitors to Gyeongbokgung Palace wearing hanbok get free entry — so on weekends the courtyard fills with tourists in traditional dress." },
+  { thumbnail: "https://images.unsplash.com/photo-1537996194471-e657df975ab4?w=400&q=80&fit=crop", city: "Ubud", country: "Indonesia", funFact: "The Tegallalang rice terraces near Ubud use a 1,000-year-old cooperative irrigation system called subak — it is a UNESCO World Heritage practice." },
+];
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap');
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0A0908;}
+.wl{font-family:'DM Sans',sans-serif;background:#0A0908;color:#F0E8D2;min-height:100vh;}
+
+/* NAV */
+.wl-nav{position:sticky;top:0;z-index:100;padding:1rem 1.75rem;display:flex;align-items:center;justify-content:space-between;background:#0A0908;border-bottom:1px solid rgba(255,255,255,0.07);}
+.wl-logo{font-family:'Cormorant Garamond',serif;font-size:1.25rem;font-weight:300;letter-spacing:0.35em;color:#C9A84C;text-transform:uppercase;cursor:pointer;background:none;border:none;}
+.wl-nav-r{display:flex;gap:0.75rem;align-items:center;}
+.wl-back{background:none;border:none;color:#6a6058;font-size:0.78rem;letter-spacing:0.1em;cursor:pointer;font-family:'DM Sans',sans-serif;transition:color 0.2s;}
+.wl-back:hover{color:#a09080;}
+.wl-upload-btn{background:#0A0908;border:1px solid rgba(201,168,76,0.45);color:#C9A84C;padding:0.4rem 1.1rem;font-size:0.73rem;letter-spacing:0.18em;text-transform:uppercase;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.2s;}
+.wl-upload-btn:hover{border-color:#C9A84C;color:#E8C97A;}
+
+/* HOME */
+.wl-home{padding:3rem 1.75rem 4rem;}
+.wl-hero{text-align:center;margin-bottom:3rem;}
+.wl-eye{font-size:0.65rem;letter-spacing:0.42em;color:#C9A84C;text-transform:uppercase;margin-bottom:0.85rem;}
+.wl-h1{font-family:'Cormorant Garamond',serif;font-size:clamp(2rem,5vw,3.5rem);font-weight:300;line-height:1.1;margin-bottom:0.85rem;}
+.wl-h1 em{font-style:italic;color:#C9A84C;}
+.wl-sub{font-size:0.83rem;color:#857A68;max-width:400px;margin:0 auto;line-height:1.75;}
+
+/* DESTINATION GRID — dark bg + map overlay, no photo */
+.wl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1px;background:#0A0908;margin-bottom:3.5rem;}
+.wl-card{cursor:pointer;display:flex;flex-direction:column;background:#131210;transition:background 0.25s;}
+.wl-card:hover{background:#1B1917;}
+.wl-card-vis{position:relative;height:170px;overflow:hidden;flex-shrink:0;}
+.wl-card-veil{position:absolute;inset:0;background:linear-gradient(155deg,rgba(10,9,8,0.3),rgba(10,9,8,0.65));}
+.wl-card-map{position:absolute;inset:0;pointer-events:none;}
+.wl-map-dim{fill:rgba(240,232,210,0.055);stroke:rgba(240,232,210,0.09);stroke-width:0.35px;}
+.wl-map-hi{fill:rgba(240,232,210,0.28);stroke:rgba(201,168,76,0.6);stroke-width:0.85px;transition:fill 0.3s,stroke 0.3s;}
+.wl-card:hover .wl-map-hi{fill:rgba(201,168,76,0.36);stroke:rgba(201,168,76,0.95);}
+.wl-card-body{padding:0.9rem 1.2rem 1.1rem;border-top:1px solid rgba(255,255,255,0.07);}
+.wl-card-tag{font-size:0.61rem;letter-spacing:0.3em;text-transform:uppercase;color:#484038;margin-bottom:0.28rem;transition:color 0.25s;}
+.wl-card:hover .wl-card-tag{color:var(--ca);}
+.wl-card-name{font-family:'Cormorant Garamond',serif;font-size:1.7rem;font-weight:300;color:#F0E8D2;line-height:1;}
+.wl-card-count{margin-top:0.25rem;font-size:0.63rem;color:#484038;letter-spacing:0.1em;}
+.wl-up-card{align-items:center;justify-content:center;min-height:220px;gap:0.6rem;border:1px dashed rgba(201,168,76,0.35)!important;background:#131210!important;}
+.wl-up-icon{font-size:1.4rem;color:#C9A84C;line-height:1;transition:color 0.25s;opacity:0.7;}
+.wl-card:hover .wl-up-icon{color:#E8C97A;opacity:1;}
+.wl-up-lbl{font-size:0.67rem;letter-spacing:0.25em;text-transform:uppercase;color:#C9A84C;transition:color 0.25s;opacity:0.7;}
+.wl-card:hover .wl-up-lbl{color:#E8C97A;opacity:1;}
+
+/* COMMUNITY GALLERY — slightly bigger */
+.wl-gallery-section{margin-top:0;}
+.wl-section-eye{font-size:0.64rem;letter-spacing:0.4em;text-transform:uppercase;color:#484038;margin-bottom:1.5rem;}
+.wl-rand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;}
+.wl-rand-card{overflow:hidden;cursor:pointer;background:#131210;}
+.wl-rand-card img{width:100%;display:block;aspect-ratio:3/2;object-fit:cover;transition:transform 0.4s ease;}
+.wl-rand-card:hover img{transform:scale(1.05);}
+.wl-rand-label{padding:0.5rem 0.7rem 0.55rem;font-size:0.66rem;letter-spacing:0.2em;text-transform:uppercase;}
+
+/* GALLERY PAGE */
+.wl-gal{padding:3rem 1.75rem;}
+.wl-gal-eye{font-size:0.66rem;letter-spacing:0.4em;text-transform:uppercase;margin-bottom:0.45rem;}
+.wl-gal-h1{font-family:'Cormorant Garamond',serif;font-size:clamp(1.9rem,4vw,3rem);font-weight:300;color:#F0E8D2;}
+.wl-gal-n{font-size:0.76rem;color:#484038;margin-top:0.3rem;margin-bottom:1.75rem;}
+.wl-gal-empty{text-align:center;padding:5rem 2rem;border:1px dashed rgba(255,255,255,0.06);}
+.wl-gal-empty p{font-family:'Cormorant Garamond',serif;font-size:1.25rem;font-weight:300;color:#484038;font-style:italic;line-height:1.6;}
+.wl-masonry{columns:2 180px;gap:12px;}
+.wl-pcard{break-inside:avoid;margin-bottom:12px;background:#1B1917;border:1px solid rgba(255,255,255,0.06);overflow:hidden;cursor:pointer;transition:border-color 0.2s;}
+.wl-pcard:hover{border-color:rgba(201,168,76,0.35);}
+.wl-pcard img{width:100%;display:block;transition:transform 0.4s ease;}
+.wl-pcard:hover img{transform:scale(1.03);}
+.wl-pmeta{padding:0.8rem 1rem;}
+.wl-ptop{display:flex;align-items:baseline;gap:0.4rem;margin-bottom:0.3rem;flex-wrap:wrap;}
+.wl-pcity{font-family:'Cormorant Garamond',serif;font-size:0.98rem;font-weight:400;color:#F0E8D2;}
+.wl-pdot{color:#484038;font-size:0.7rem;}
+.wl-pctry{font-size:0.68rem;letter-spacing:0.1em;}
+.wl-pfact{font-size:0.74rem;color:#857A68;line-height:1.65;}
+
+/* UPLOAD PAGE */
+.wl-upage{padding:3rem 1.75rem;max-width:600px;margin:0 auto;}
+.wl-up-eye2{font-size:0.66rem;letter-spacing:0.42em;text-transform:uppercase;color:#C9A84C;margin-bottom:0.45rem;}
+.wl-up-h1{font-family:'Cormorant Garamond',serif;font-size:clamp(1.7rem,4vw,2.6rem);font-weight:300;color:#F0E8D2;margin-bottom:0.4rem;}
+.wl-up-sub{font-size:0.8rem;color:#857A68;line-height:1.7;margin-bottom:1.75rem;}
+.wl-drop{border:1px dashed rgba(255,255,255,0.1);padding:3.5rem 2rem;text-align:center;cursor:pointer;transition:all 0.2s;}
+.wl-drop.over{border-color:#C9A84C;background:rgba(201,168,76,0.04);}
+.wl-drop-icon{font-size:1.8rem;color:#484038;margin-bottom:0.9rem;transition:color 0.2s;line-height:1;}
+.wl-drop.over .wl-drop-icon{color:#C9A84C;}
+.wl-drop-main{font-family:'Cormorant Garamond',serif;font-size:1.1rem;font-weight:300;color:#857A68;margin-bottom:0.3rem;}
+.wl-drop-sub{font-size:0.68rem;color:#484038;letter-spacing:0.12em;}
+.wl-prev{position:relative;margin-bottom:1.1rem;}
+.wl-prev img{width:100%;display:block;max-height:45vh;object-fit:contain;background:#131210;}
+.wl-detecting{position:absolute;inset:0;background:rgba(10,9,8,0.72);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.7rem;}
+.wl-det-lbl{font-size:0.66rem;letter-spacing:0.35em;color:#C9A84C;text-transform:uppercase;animation:wpulse 2s infinite;}
+.wl-bar{width:90px;height:1px;background:rgba(201,168,76,0.18);position:relative;overflow:hidden;}
+.wl-bar::after{content:'';position:absolute;top:0;left:-50%;width:50%;height:100%;background:#C9A84C;animation:wscan 1.5s ease-in-out infinite;}
+.wl-result{border:1px solid rgba(255,255,255,0.08);padding:1.3rem;margin-bottom:1.1rem;background:#131210;}
+.wl-rloc{display:flex;align-items:baseline;gap:0.65rem;margin-bottom:0.6rem;flex-wrap:wrap;}
+.wl-rcity{font-family:'Cormorant Garamond',serif;font-size:1.55rem;font-weight:400;color:#F0E8D2;}
+.wl-rctry{font-size:0.74rem;letter-spacing:0.12em;}
+.wl-rfact{font-size:0.79rem;color:#857A68;line-height:1.7;}
+.wl-racts{margin-top:1.1rem;display:flex;gap:0.65rem;flex-wrap:wrap;}
+.wl-btn-p{background:#C9A84C;border:none;color:#0A0908;padding:0.6rem 1.5rem;font-size:0.74rem;letter-spacing:0.18em;text-transform:uppercase;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity 0.2s;}
+.wl-btn-p:hover{opacity:0.88;}
+.wl-btn-s{background:none;border:1px solid #3a3530;color:#6a6058;padding:0.6rem 1.1rem;font-size:0.74rem;letter-spacing:0.15em;text-transform:uppercase;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.2s;}
+.wl-btn-s:hover{border-color:#6a6058;color:#a09080;}
+.wl-err{font-size:0.76rem;color:#C94040;margin-top:0.7rem;line-height:1.5;}
+.wl-notfound{font-size:0.76rem;color:#857A68;margin-top:0.65rem;line-height:1.5;padding:0.65rem;border-left:2px solid #3a3530;}
+
+/* LIGHTBOX */
+.wl-lb{position:fixed;inset:0;z-index:500;background:rgba(5,4,4,0.94);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem;cursor:pointer;}
+.wl-lb-inner{cursor:default;display:flex;flex-direction:column;align-items:center;width:100%;}
+.wl-lb img{max-width:100%;max-height:68vh;object-fit:contain;display:block;}
+.wl-lb-meta{margin-top:1.1rem;text-align:center;max-width:520px;}
+.wl-lb-city{font-family:'Cormorant Garamond',serif;font-size:1.45rem;font-weight:300;color:#F0E8D2;}
+.wl-lb-ctry{font-size:0.7rem;letter-spacing:0.14em;margin-left:0.5rem;}
+.wl-lb-fact{font-size:0.78rem;color:#857A68;line-height:1.7;margin-top:0.4rem;}
+.wl-lb-close{position:absolute;top:1.25rem;right:1.5rem;background:none;border:none;color:#6a6058;font-size:1.4rem;cursor:pointer;line-height:1;transition:color 0.2s;}
+.wl-lb-close:hover{color:#F0E8D2;}
+
+@keyframes wpulse{0%,100%{opacity:1}50%{opacity:0.3}}
+@keyframes wscan{0%{left:-50%}100%{left:150%}}
+
+/* NAME PROMPT */
+.wl-name-overlay{position:fixed;inset:0;z-index:600;background:rgba(5,4,4,0.97);display:flex;align-items:center;justify-content:center;padding:1.5rem;}
+.wl-name-box{background:#131210;border:1px solid rgba(201,168,76,0.25);padding:2.5rem;max-width:420px;width:100%;}
+.wl-name-input{width:100%;background:#0A0908;border:1px solid #3a3530;color:#F0E8D2;padding:0.7rem 0.9rem;font-size:0.9rem;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:0.75rem;}
+.wl-name-input:focus{border-color:rgba(201,168,76,0.5);}
+
+/* JOURNEY */
+.wl-journey{margin-top:3.5rem;padding-top:3rem;border-top:1px solid rgba(255,255,255,0.06);}
+.wl-journey-stats{display:flex;gap:2.5rem;margin-bottom:2rem;}
+.wl-jstat-num{font-family:'Cormorant Garamond',serif;font-size:2.2rem;font-weight:300;color:#C9A84C;line-height:1;}
+.wl-jstat-lbl{font-size:0.62rem;letter-spacing:0.18em;text-transform:uppercase;color:#484038;margin-top:0.2rem;}
+.wl-journey-hint{font-size:0.65rem;letter-spacing:0.1em;color:#3a3530;text-transform:uppercase;margin-bottom:0.75rem;}
+.wl-journey-list{display:flex;flex-direction:column;gap:0;}
+.wl-jcard{display:flex;align-items:stretch;background:#0e0d0b;border:1px solid rgba(255,255,255,0.06);border-bottom:none;cursor:grab;transition:background 0.15s;}
+.wl-jcard:last-child{border-bottom:1px solid rgba(255,255,255,0.06);}
+.wl-jcard:active{cursor:grabbing;}
+.wl-jcard:hover{background:#131210;}
+.wl-jcard-over{border-top:2px solid #C9A84C !important;background:#131210;}
+.wl-jcard-img{width:220px;height:160px;object-fit:cover;flex-shrink:0;display:block;}
+.wl-jcard-nophoto{background:#1B1917;width:220px;height:160px;flex-shrink:0;}
+.wl-jcard-info{width:220px;flex-shrink:0;padding:1.25rem 1.5rem;display:flex;flex-direction:column;justify-content:space-between;border-right:1px solid rgba(255,255,255,0.06);}
+.wl-jcard-date{font-size:0.65rem;letter-spacing:0.16em;text-transform:uppercase;color:#C9A84C;margin-bottom:0.4rem;}
+.wl-jcard-city{font-family:'Cormorant Garamond',serif;font-size:1.5rem;font-weight:300;color:#F0E8D2;line-height:1.2;}
+.wl-jcard-country{font-size:0.65rem;letter-spacing:0.14em;text-transform:uppercase;color:#484038;margin-top:0.25rem;}
+.wl-jcard-fact{flex:1;padding:1.25rem 1.5rem;display:flex;align-items:center;}
+.wl-jcard-fact p{font-family:'Cormorant Garamond',serif;font-size:1rem;font-weight:300;color:#857A68;line-height:1.7;font-style:italic;}
+.wl-jcard-grip{padding:0 1.25rem;color:#3a3530;font-size:1.3rem;cursor:grab;user-select:none;display:flex;align-items:center;}
+.wl-pub-check{display:flex;align-items:center;gap:0.5rem;font-size:0.72rem;letter-spacing:0.08em;color:#857A68;cursor:pointer;margin-bottom:0.5rem;}
+.wl-pub-check input{width:14px;height:14px;accent-color:#C9A84C;cursor:pointer;}
+.wl-pub-check:hover{color:#F0E8D2;}
+.wl-jcard-pub{background:none;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:0.55rem;letter-spacing:0.2em;text-transform:uppercase;color:#3a3530;padding:0;margin-top:0.85rem;transition:color 0.2s;}
+.wl-jcard-pub:hover{color:#857A68;}
+.wl-jcard-pub-on{color:#C9A84C !important;}
+
+/* STRESS TESTER */
+.st-wrap{position:fixed;bottom:1.5rem;left:1.5rem;z-index:300;font-family:'DM Sans',sans-serif;}
+.st-toggle{background:#0A0908;border:1px solid rgba(201,168,76,0.4);color:#C9A84C;padding:0.4rem 0.9rem;font-size:0.7rem;letter-spacing:0.15em;text-transform:uppercase;cursor:pointer;font-family:'DM Sans',sans-serif;transition:border-color 0.2s;}
+.st-toggle:hover{border-color:#C9A84C;}
+.st-panel{background:#131210;border:1px solid rgba(201,168,76,0.2);padding:1.2rem;width:286px;margin-top:0.4rem;}
+.st-label{font-size:0.58rem;letter-spacing:0.2em;text-transform:uppercase;color:#857A68;display:block;margin-bottom:0.3rem;}
+.st-input{width:100%;background:#0A0908;border:1px solid #3a3530;color:#F0E8D2;padding:0.38rem 0.55rem;font-size:0.74rem;font-family:'DM Sans',sans-serif;outline:none;}
+.st-select{width:100%;background:#0A0908;border:1px solid #3a3530;color:#F0E8D2;padding:0.38rem;font-size:0.74rem;font-family:'DM Sans',sans-serif;outline:none;}
+.st-run{width:100%;background:#C9A84C;border:none;color:#0A0908;padding:0.5rem;font-size:0.7rem;letter-spacing:0.15em;text-transform:uppercase;cursor:pointer;font-weight:500;font-family:'DM Sans',sans-serif;transition:opacity 0.2s;}
+.st-run:hover{opacity:0.88;}
+.st-run.active{background:#C94040;color:#fff;}
+.st-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;}
+.st-metric{background:#0A0908;padding:0.4rem 0.55rem;}
+.st-metric-label{font-size:0.54rem;letter-spacing:0.12em;text-transform:uppercase;color:#504840;margin-bottom:0.15rem;}
+.st-metric-val{font-size:1rem;color:#F0E8D2;font-family:'Cormorant Garamond',serif;font-weight:300;}
+.st-err-row{display:flex;justify-content:space-between;align-items:center;}
+.st-err-label{font-size:0.56rem;text-transform:uppercase;letter-spacing:0.12em;color:#504840;}
+.st-err-val{font-size:0.72rem;color:#C94040;font-weight:500;}
+.st-note{font-size:0.54rem;color:#3a3530;text-align:center;margin-top:0.35rem;line-height:1.4;}
+`;
+
+/* ── Lightbox ─────────────────────────────────────────────────────────────── */
+function Lightbox({
+  photo,
+  accent,
+  onClose
+}) {
+  useEffect(() => {
+    const fn = e => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, [onClose]);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "wl-lb",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "wl-lb-close",
+    onClick: onClose
+  }, "\u2715"), /*#__PURE__*/React.createElement("div", {
+    className: "wl-lb-inner",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("img", {
+    src: photo.dataURL,
+    alt: `${photo.city}, ${photo.country}`
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wl-lb-meta"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "wl-lb-city"
+  }, photo.city), /*#__PURE__*/React.createElement("span", {
+    className: "wl-lb-ctry",
+    style: {
+      color: accent
+    }
+  }, photo.country)), /*#__PURE__*/React.createElement("p", {
+    className: "wl-lb-fact"
+  }, photo.funFact))));
+}
+
+/* ── CommunityGallery — seeded + real public photos from RDS ─────────────── */
+function CommunityGallery({ journey, userName, onOpenLightbox }) {
+  const [serverPhotos, setServerPhotos] = useState([]);
+  useEffect(() => {
+    if (!userName) return;
+    apiLoadCommunity(userName).then(rows => {
+      if (rows.length > 0) setServerPhotos(rows);
+    });
+  }, [userName]);
+
+  const communityPhotos = useMemo(() => {
+    const fromServer = serverPhotos.map(p => ({ ...p, funFact: p.funFact }));
+    return [...fromServer, ...SEEDED_COMMUNITY];
+  }, [serverPhotos]);
+
+  return /*#__PURE__*/React.createElement("div", { className: "wl-gallery-section" },
+    /*#__PURE__*/React.createElement("p", { className: "wl-section-eye" }, "From the community"),
+    /*#__PURE__*/React.createElement("div", { className: "wl-rand-grid" },
+      communityPhotos.map((p, i) => {
+        const dest = DESTINATIONS.find(d => d.id === resolveDestId(p.country)) || { accent: "#C9A84C" };
+        return /*#__PURE__*/React.createElement("div", {
+          key: i, className: "wl-rand-card",
+          onClick: () => onOpenLightbox({ dataURL: p.thumbnail, city: p.city, country: p.country, funFact: p.funFact }, dest.accent)
+        },
+          /*#__PURE__*/React.createElement("img", { src: p.thumbnail, alt: `${p.city}, ${p.country}` }),
+          /*#__PURE__*/React.createElement("div", { className: "wl-rand-label", style:{ color: dest.accent } }, p.city)
+        );
+      })
+    )
+  );
+}
+
+/* ── DestCard — map visual + text info ───────────────────────────────────── */
+function DestCard({
+  dest,
+  world,
+  photoList,
+  onClick
+}) {
+  const n = photoList.length;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "wl-card",
+    style: {
+      "--ca": dest.accent
+    },
+    onClick: onClick
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-vis"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      inset: 0,
+      background: "#0e0d0b"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-veil"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-map"
+  }, /*#__PURE__*/React.createElement(CountryMap, {
+    destId: dest.id,
+    world: world
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-body"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-tag"
+  }, dest.tag), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-name"
+  }, dest.name), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card-count"
+  }, n === 0 ? "No photos yet" : `${n} photo${n !== 1 ? "s" : ""}`)));
+}
+
+/* ── NavBar ───────────────────────────────────────────────────────────────── */
+function NavBar({
+  page,
+  onHome,
+  onUpload
+}) {
+  return /*#__PURE__*/React.createElement("nav", {
+    className: "wl-nav"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "wl-logo",
+    onClick: onHome
+  }, "WanderLens"), /*#__PURE__*/React.createElement("div", {
+    className: "wl-nav-r"
+  }, page !== "home" && /*#__PURE__*/React.createElement("button", {
+    className: "wl-back",
+    onClick: onHome
+  }, "\u2190 Back"), /*#__PURE__*/React.createElement("button", {
+    className: "wl-upload-btn",
+    onClick: onUpload
+  }, "Upload")));
+}
+function HomePage({
+  photos, world, journey, userName, onReorder, onTogglePublic, onSelectDest, onUpload, onOpenLightbox
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "wl-home"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-hero"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "wl-eye"
+  }, "A Community Photo Atlas"), /*#__PURE__*/React.createElement("h1", {
+    className: "wl-h1"
+  }, "Asia Through", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("em", null, "Your Lens")), /*#__PURE__*/React.createElement("p", {
+    className: "wl-sub"
+  }, "Explore and contribute to a growing collection of travel photographs across six iconic Asian destinations \u2014 each identified by AI.")), /*#__PURE__*/React.createElement("div", {
+    className: "wl-grid"
+  }, DESTINATIONS.map(d => /*#__PURE__*/React.createElement(DestCard, {
+    key: d.id,
+    dest: d,
+    world: world,
+    photoList: photos[d.id] || [],
+    onClick: () => onSelectDest(d.id)
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "wl-card wl-up-card",
+    onClick: onUpload
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-up-icon"
+  }, "+"), /*#__PURE__*/React.createElement("div", {
+    className: "wl-up-lbl"
+  }, "Upload a Photo"))), /*#__PURE__*/React.createElement(CommunityGallery, {
+    journey: journey,
+    userName: userName,
+    onOpenLightbox: onOpenLightbox
+  }), userName && /*#__PURE__*/React.createElement(JourneySection, {
+    journey: journey,
+    userName: userName,
+    onReorder: onReorder,
+    onTogglePublic: onTogglePublic
+  }));
+}
+
+/* ── GalleryPage ──────────────────────────────────────────────────────────── */
+function GalleryPage({
+  destId,
+  photos,
+  onOpenLightbox
+}) {
+  const dest = DESTINATIONS.find(d => d.id === destId);
+  const list = photos[destId] || [];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "wl-gal"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "wl-gal-eye",
+    style: {
+      color: dest.accent
+    }
+  }, dest.tag), /*#__PURE__*/React.createElement("h1", {
+    className: "wl-gal-h1"
+  }, dest.name), /*#__PURE__*/React.createElement("p", {
+    className: "wl-gal-n"
+  }, list.length, " photograph", list.length !== 1 ? "s" : ""), list.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "wl-gal-empty"
+  }, /*#__PURE__*/React.createElement("p", null, "No photographs yet.", /*#__PURE__*/React.createElement("br", null), "Be the first to contribute.")) : /*#__PURE__*/React.createElement("div", {
+    className: "wl-masonry"
+  }, list.map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: "wl-pcard",
+    onClick: () => onOpenLightbox(p, dest.accent)
+  }, /*#__PURE__*/React.createElement("img", {
+    src: p.dataURL,
+    alt: `${p.city}, ${p.country}`,
+    loading: "lazy"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wl-pmeta"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-ptop"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "wl-pcity"
+  }, p.city), /*#__PURE__*/React.createElement("span", {
+    className: "wl-pdot"
+  }, "\xB7"), /*#__PURE__*/React.createElement("span", {
+    className: "wl-pctry",
+    style: {
+      color: dest.accent
+    }
+  }, p.country)), p.funFact ? /*#__PURE__*/React.createElement("p", {
+    className: "wl-pfact"
+  }, p.funFact) : /*#__PURE__*/React.createElement("p", {
+    className: "wl-pfact",
+    style: {
+      color: "#3a3530",
+      fontStyle: "italic"
+    }
+  }, "No fact available"))))));
+}
+
+/* ── UploadPage ───────────────────────────────────────────────────────────── */
+function UploadPage({
+  onPhotoAdded
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [detecting, setDetecting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [showManual, setShowManual] = useState(false);
+  const [manualCity, setManualCity] = useState("");
+  const [manualCountry, setManualCountry] = useState("");
+  const [userDate, setUserDate] = useState("");
+  const [isPublicUpload, setIsPublicUpload] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const inputRef = useRef(null);
+  const previewBase64Ref = useRef(null);
+  const previewTypeRef = useRef(null);
+  const apiImageRef = useRef(null); // compressed version for API calls
+  const handleFile = useCallback(async file => {
+    if (!file?.type.startsWith("image/")) {
+      setError("Please upload an image file.");
+      return;
+    }
+    setError(null);
+    setResult(null);
+    setShowManual(false);
+    setManualCity("");
+    setManualCountry("");
+    const dataURL = await new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.readAsDataURL(file);
+    });
+    setPreview(dataURL);
+    previewBase64Ref.current = dataURL.split(",")[1];
+    previewTypeRef.current = file.type;
+    // Compress to max 1024px for API calls (avoids 10MB API Gateway limit)
+    const compressed = await compressForAPI(dataURL);
+    apiImageRef.current = compressed;
+    setDetecting(true);
+    try {
+      const raw = await callClaude({
+        max_tokens: 600,
+        messages: [{
+          role: "user",
+          content: [{
+            type: "image",
+            source: { type: "base64", media_type: apiImageRef.current?.type || "image/jpeg", data: apiImageRef.current?.data || previewBase64Ref.current }
+          }, {
+            type: "text",
+            text: 'Where is this photo taken? Reply with ONLY a JSON object, no markdown, no explanation:\n{"city":"<main city name, e.g. Tokyo>","district":"<specific district or neighborhood if identifiable, otherwise empty string>","country":"<full country name>","lat":<latitude as decimal number>,"lng":<longitude as decimal number>,"funFact":"<2-3 sentence fun fact about what is visible in this photo — specific landmark, building, food, or cultural detail — or about the city if nothing specific is identifiable>"}'
+          }]
+        }]
+      });
+      const parsed = JSON.parse(raw.match(/\{[\s\S]*?\}/)?.[0] || raw);
+      // Normalise key names — AI sometimes uses fun_fact or fact instead of funFact
+      const funFact = parsed.funFact || parsed.fun_fact || parsed.fact || parsed.funfact || "";
+      const destId = resolveDestId(parsed.country) || null;
+      const cityDisplay = parsed.district
+        ? `${parsed.city}, ${parsed.district}`
+        : parsed.city || "";
+      setResult({
+        city: cityDisplay,
+        country: parsed.country || "",
+        lat: parsed.lat || null,
+        lng: parsed.lng || null,
+        funFact,
+        destId,
+        dataURL
+      });
+    } catch (e) {
+      setError("Could not detect location automatically.");
+      setShowManual(true);
+    } finally {
+      setDetecting(false);
+    }
+  }, []);
+
+  // Called when user manually enters city+country and clicks Add to Gallery
+  const handleManualAdd = async () => {
+    const city = manualCity.trim();
+    const country = manualCountry.trim();
+    if (!city || !country) return;
+    const destId = resolveDestId(country) || null;
+    if (!destId) {
+      setError(`"${country}" isn't one of our six destinations. Try: Thailand, Vietnam, Japan, Korea, Taiwan, or Hong Kong.`);
+      return;
+    }
+    setAdding(true);
+    setError(null);
+    try {
+      // Step 1 — validate city is real and get lat/lng
+      let lat = null, lng = null;
+      try {
+        const validation = await callClaude({
+          max_tokens: 100,
+          messages: [{ role: "user", content: `Is "${city}" a real city or place in ${country}? If yes reply with ONLY JSON: {"valid":true,"lat":<latitude>,"lng":<longitude>}. If no, reply with ONLY: {"valid":false}` }]
+        });
+        const vParsed = JSON.parse(validation.match(/\{[\s\S]*?\}/)?.[0] || validation);
+        if (!vParsed.valid) {
+          setError(`"${city}" doesn't seem to be a real place — check the spelling and try again.`);
+          setAdding(false);
+          return;
+        }
+        lat = vParsed.lat || null;
+        lng = vParsed.lng || null;
+      } catch (_) {/* if validation fails, continue without coords */}
+
+      // Step 2 — get fun fact (with image if available, text-only fallback)
+      let funFact = "";
+      if (apiImageRef.current) {
+        try {
+          funFact = await callClaude({
+            max_tokens: 250,
+            messages: [{ role: "user", content: [
+              { type: "image", source: { type: "base64", media_type: apiImageRef.current.type, data: apiImageRef.current.data } },
+              { type: "text", text: `This travel photo is from ${city}, ${country}. Write a single fascinating 2-3 sentence fun fact. If you can identify a specific landmark, building, dish, or cultural detail in the image, base the fact on that. Otherwise write a remarkable fact about ${city}. Reply with just the fact, no introduction.` }
+            ]}]
+          });
+        } catch (_) {/* fall through */}
+      }
+      if (!funFact) {
+        try {
+          funFact = await callClaude({
+            max_tokens: 200,
+            messages: [{ role: "user", content: `Write one fascinating and specific 2-3 sentence fun fact about ${city}, ${country}. Make it surprising and memorable. Reply with just the fact.` }]
+          });
+        } catch (_) {/* fall through */}
+      }
+      if (!funFact) funFact = `${city} is a captivating destination in ${country} known for its unique culture and history.`;
+
+      onPhotoAdded({ city, country, lat, lng, funFact, destId, dataURL: preview, userDate, isPublic: isPublicUpload });
+      reset();
+    } catch (e) {
+      setError("Could not add photo: " + e.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+  const reset = () => {
+    setPreview(null);
+    setResult(null);
+    setError(null);
+    setShowManual(false);
+    setManualCity("");
+    setManualCountry("");
+    setUserDate("");
+    setIsPublicUpload(false);
+    previewBase64Ref.current = null;
+    previewTypeRef.current = null;
+    apiImageRef.current = null;
+    if (inputRef.current) inputRef.current.value = "";
+  };
+  const dest = result?.destId ? DESTINATIONS.find(d => d.id === result.destId) : null;
+  const manualDest = DESTINATIONS.find(d => d.id === resolveDestId(manualCountry.trim()));
+  const inputStyle = {
+    width: "100%",
+    padding: "0.6rem 0.75rem",
+    background: "#0A0908",
+    border: "1px solid #3a3530",
+    color: "#F0E8D2",
+    fontSize: "0.82rem",
+    fontFamily: "'DM Sans',sans-serif",
+    outline: "none"
+  };
+  const labelStyle = {
+    fontSize: "0.65rem",
+    letterSpacing: "0.2em",
+    textTransform: "uppercase",
+    color: "#6a6058",
+    marginBottom: "0.4rem",
+    display: "block"
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "wl-upage"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "wl-up-eye2"
+  }, "Contribute"), /*#__PURE__*/React.createElement("h1", {
+    className: "wl-up-h1"
+  }, "Upload a Photograph"), /*#__PURE__*/React.createElement("p", {
+    className: "wl-up-sub"
+  }, "Our AI analyzes your photo and automatically identifies the location and a fun fact \u2014 no tagging needed."), !preview ? /*#__PURE__*/React.createElement("div", {
+    className: `wl-drop${dragOver ? " over" : ""}`,
+    onDragOver: e => {
+      e.preventDefault();
+      setDragOver(true);
+    },
+    onDragLeave: () => setDragOver(false),
+    onDrop: e => {
+      e.preventDefault();
+      setDragOver(false);
+      handleFile(e.dataTransfer.files[0]);
+    },
+    onClick: () => inputRef.current?.click()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-drop-icon"
+  }, "\u2191"), /*#__PURE__*/React.createElement("p", {
+    className: "wl-drop-main"
+  }, "Drop your photo here"), /*#__PURE__*/React.createElement("p", {
+    className: "wl-drop-sub"
+  }, "or click to browse"), /*#__PURE__*/React.createElement("input", {
+    ref: inputRef,
+    type: "file",
+    accept: "image/*",
+    style: {
+      display: "none"
+    },
+    onChange: e => handleFile(e.target.files[0])
+  })) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "wl-prev"
+  }, /*#__PURE__*/React.createElement("img", {
+    src: preview,
+    alt: "preview"
+  }), (detecting || adding) && /*#__PURE__*/React.createElement("div", {
+    className: "wl-detecting"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-det-lbl"
+  }, adding ? "Adding to gallery…" : "Analyzing photo…"), /*#__PURE__*/React.createElement("div", {
+    className: "wl-bar"
+  }))), result && !detecting && !showManual && /*#__PURE__*/React.createElement("div", {
+    className: "wl-result"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wl-rloc"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "wl-rcity"
+  }, result.city), /*#__PURE__*/React.createElement("span", {
+    className: "wl-rctry",
+    style: {
+      color: dest?.accent || "#857A68"
+    }
+  }, result.country)), /*#__PURE__*/React.createElement("p", {
+    className: "wl-rfact"
+  }, result.funFact), /*#__PURE__*/React.createElement("div", {
+    style: { margin: "0.75rem 0" }
+  }, /*#__PURE__*/React.createElement("label", { style: labelStyle }, "Date taken \u2014 optional"),
+  /*#__PURE__*/React.createElement("input", {
+    type: "date", value: userDate,
+    onChange: e => setUserDate(e.target.value),
+    style: { ...inputStyle, colorScheme: "dark", width: "100%" }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "wl-racts"
+  }, dest ? /*#__PURE__*/React.createElement(React.Fragment, null,
+    /*#__PURE__*/React.createElement("label", { className: "wl-pub-check" },
+      /*#__PURE__*/React.createElement("input", {
+        type: "checkbox", checked: isPublicUpload,
+        onChange: e => setIsPublicUpload(e.target.checked)
+      }),
+      "Share with community"
+    ),
+    /*#__PURE__*/React.createElement("button", {
+      className: "wl-btn-p",
+      onClick: () => { onPhotoAdded({ ...result, userDate, isPublic: isPublicUpload }); reset(); }
+    }, "Add to ", dest.name, " Gallery \u2192")
+  ) : /*#__PURE__*/React.createElement("p", {
+    className: "wl-notfound"
+  }, "\"", result.country, "\" isn't one of our six destinations. Enter the location manually below."))), !detecting && !adding && /*#__PURE__*/React.createElement(React.Fragment, null, !showManual && /*#__PURE__*/React.createElement("button", {
+    className: "wl-btn-s",
+    style: {
+      marginBottom: "0.5rem"
+    },
+    onClick: () => {
+      setShowManual(true);
+      if (result) {
+        setManualCity(result.city);
+        setManualCountry(result.country);
+      }
+    }
+  }, result ? "Edit location" : "Enter location manually"), showManual && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: "1px solid #3a3530",
+      padding: "1.25rem",
+      background: "#0d0c0a",
+      marginBottom: "0.75rem"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: "0.75rem",
+      color: "#857A68",
+      marginBottom: "1.1rem",
+      lineHeight: 1.6
+    }
+  }, "Enter the location and we'll find the right gallery for your photo."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: "0.75rem",
+      marginBottom: "1rem"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: labelStyle
+  }, "City"), /*#__PURE__*/React.createElement("input", {
+    style: inputStyle,
+    placeholder: "e.g. Kyoto",
+    value: manualCity,
+    onChange: e => {
+      setManualCity(e.target.value);
+      setError(null);
+    },
+    onKeyDown: e => e.key === "Enter" && handleManualAdd()
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: labelStyle
+  }, "Country"), /*#__PURE__*/React.createElement("input", {
+    style: inputStyle,
+    placeholder: "e.g. Japan",
+    value: manualCountry,
+    onChange: e => {
+      setManualCountry(e.target.value);
+      setError(null);
+    },
+    onKeyDown: e => e.key === "Enter" && handleManualAdd()
+  }))), /*#__PURE__*/React.createElement("div", null,
+  /*#__PURE__*/React.createElement("label", { style: labelStyle }, "Date taken \u2014 optional"),
+  /*#__PURE__*/React.createElement("input", {
+    type: "date", value: userDate,
+    onChange: e => setUserDate(e.target.value),
+    style: { ...inputStyle, colorScheme: "dark" }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: { display: "flex", gap: "0.65rem", alignItems: "center", flexWrap: "wrap" }
+  }, /*#__PURE__*/React.createElement("label", { className: "wl-pub-check" },
+    /*#__PURE__*/React.createElement("input", {
+      type: "checkbox", checked: isPublicUpload,
+      onChange: e => setIsPublicUpload(e.target.checked)
+    }), "Share with community"
+  ), /*#__PURE__*/React.createElement("button", {
+    className: "wl-btn-p",
+    disabled: !manualCity.trim() || !manualCountry.trim(),
+    onClick: handleManualAdd,
+    style: { opacity: !manualCity.trim() || !manualCountry.trim() ? 0.5 : 1 }
+  }, manualDest ? `Add to ${manualDest.name} Gallery →` : "Add to Gallery →"), /*#__PURE__*/React.createElement("button", {
+    className: "wl-btn-s",
+    onClick: () => { setShowManual(false); setError(null); }
+  }, "Cancel")))), error && /*#__PURE__*/React.createElement("p", {
+    className: "wl-err"
+  }, error), !detecting && !adding && /*#__PURE__*/React.createElement("button", {
+    className: "wl-btn-s",
+    style: {
+      marginTop: "0.5rem"
+    },
+    onClick: reset
+  }, "Upload Different Photo")));
+}
+
+/* ── StressTester ─────────────────────────────────────────────────────────── */
+function StressTester() {
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [url, setUrl] = useState("");
+  const [conc, setConc] = useState("10");
+  const [dur, setDur] = useState("10");
+  const [metrics, setMetrics] = useState(null);
+  const canvasRef = useRef(null);
+  const stateRef = useRef({
+    results: [],
+    errors: 0,
+    start: 0
+  });
+  const timerRef = useRef(null);
+  const stopRef = useRef(false);
+  const drawChart = useCallback(results => {
+    const c = canvasRef.current;
+    if (!c || !results.length) return;
+    const ctx = c.getContext("2d");
+    const W = c.offsetWidth || 264,
+      H = 76;
+    c.width = W;
+    c.height = H;
+    ctx.clearRect(0, 0, W, H);
+    const buckets = [0, 0, 0, 0, 0];
+    results.forEach(t => {
+      if (t < 100) buckets[0]++;else if (t < 250) buckets[1]++;else if (t < 500) buckets[2]++;else if (t < 1000) buckets[3]++;else buckets[4]++;
+    });
+    const max = Math.max(...buckets, 1);
+    const colors = ["#3AC984", "#C9A84C", "#D4943A", "#C94040", "#7a1212"];
+    const labels = ["<100", "<250", "<500", "<1s", ">1s"];
+    const bw = W / 5 - 4;
+    buckets.forEach((n, i) => {
+      const bh = n / max * (H - 18),
+        x = i * (W / 5) + 2,
+        y = H - 18 - bh;
+      ctx.fillStyle = colors[i];
+      ctx.fillRect(x, y, bw, bh);
+      ctx.fillStyle = "#504840";
+      ctx.font = "9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(labels[i], x + bw / 2, H - 4);
+      if (n > 0) {
+        ctx.fillStyle = "#F0E8D2";
+        ctx.fillText(n, x + bw / 2, y - 2);
+      }
+    });
+  }, []);
+  const tick = useCallback(() => {
+    const {
+      results,
+      errors,
+      start
+    } = stateRef.current;
+    const elapsed = (Date.now() - start) / 1000 || 0.001;
+    const total = results.length + errors;
+    const sorted = [...results].sort((a, b) => a - b);
+    setMetrics({
+      total,
+      rps: (total / elapsed).toFixed(1),
+      avg: results.length ? results.reduce((a, b) => a + b, 0) / results.length | 0 + "ms" : "—",
+      p95: sorted.length ? sorted[Math.floor(sorted.length * 0.95)] | 0 + "ms" : "—",
+      err: total ? (errors / total * 100).toFixed(1) + "%" : "0%"
+    });
+    drawChart(results);
+  }, [drawChart]);
+  const stop = useCallback(() => {
+    stopRef.current = true;
+    clearInterval(timerRef.current);
+    setRunning(false);
+    tick();
+  }, [tick]);
+  const run = useCallback(async () => {
+    if (running) {
+      stop();
+      return;
+    }
+    const target = url.trim() || window.location.href;
+    stateRef.current = {
+      results: [],
+      errors: 0,
+      start: Date.now()
+    };
+    stopRef.current = false;
+    setRunning(true);
+    setMetrics({
+      total: 0,
+      rps: "0",
+      avg: "—",
+      p95: "—",
+      err: "0%"
+    });
+    timerRef.current = setInterval(tick, 400);
+    const end = Date.now() + parseInt(dur) * 1000;
+    const worker = async () => {
+      while (!stopRef.current && Date.now() < end) {
+        const t0 = performance.now();
+        try {
+          await fetch(target, {
+            cache: "no-store",
+            mode: "no-cors"
+          });
+          stateRef.current.results.push(performance.now() - t0);
+        } catch {
+          stateRef.current.errors++;
+        }
+      }
+    };
+    await Promise.all(Array.from({
+      length: parseInt(conc)
+    }, worker));
+    stop();
+  }, [running, url, dur, conc, stop, tick]);
+  useEffect(() => () => {
+    stopRef.current = true;
+    clearInterval(timerRef.current);
+  }, []);
+  const S = {
+    wrap: {
+      position: "fixed",
+      bottom: "1.5rem",
+      left: "1.5rem",
+      zIndex: 300,
+      fontFamily: "'DM Sans',sans-serif"
+    },
+    toggle: {
+      background: "#0A0908",
+      border: "1px solid rgba(201,168,76,0.4)",
+      color: "#C9A84C",
+      padding: "0.4rem 0.9rem",
+      fontSize: "0.7rem",
+      letterSpacing: "0.15em",
+      textTransform: "uppercase",
+      cursor: "pointer",
+      fontFamily: "inherit"
+    },
+    panel: {
+      background: "#131210",
+      border: "1px solid rgba(201,168,76,0.2)",
+      padding: "1.2rem",
+      width: 282,
+      marginTop: "0.4rem"
+    },
+    label: {
+      fontSize: "0.58rem",
+      letterSpacing: "0.2em",
+      textTransform: "uppercase",
+      color: "#857A68",
+      display: "block",
+      marginBottom: "0.28rem"
+    },
+    input: {
+      width: "100%",
+      background: "#0A0908",
+      border: "1px solid #3a3530",
+      color: "#F0E8D2",
+      padding: "0.38rem 0.55rem",
+      fontSize: "0.74rem",
+      fontFamily: "inherit",
+      outline: "none"
+    },
+    sel: {
+      width: "100%",
+      background: "#0A0908",
+      border: "1px solid #3a3530",
+      color: "#F0E8D2",
+      padding: "0.36rem",
+      fontSize: "0.74rem",
+      fontFamily: "inherit",
+      outline: "none"
+    },
+    run: r => ({
+      width: "100%",
+      background: r ? "#C94040" : "#C9A84C",
+      border: "none",
+      color: r ? "#fff" : "#0A0908",
+      padding: "0.5rem",
+      fontSize: "0.7rem",
+      letterSpacing: "0.15em",
+      textTransform: "uppercase",
+      cursor: "pointer",
+      fontWeight: 500,
+      fontFamily: "inherit",
+      marginBottom: "0.8rem"
+    }),
+    metric: {
+      background: "#0A0908",
+      padding: "0.4rem 0.55rem"
+    },
+    mlbl: {
+      fontSize: "0.54rem",
+      letterSpacing: "0.12em",
+      textTransform: "uppercase",
+      color: "#504840",
+      marginBottom: "0.12rem"
+    },
+    mval: {
+      fontSize: "1rem",
+      color: "#F0E8D2",
+      fontFamily: "'Cormorant Garamond',serif",
+      fontWeight: 300
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: S.wrap
+  }, /*#__PURE__*/React.createElement("button", {
+    style: S.toggle,
+    onClick: () => setOpen(o => !o)
+  }, "\u26A1 Stress Test"), open && /*#__PURE__*/React.createElement("div", {
+    style: S.panel
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: "0.75rem"
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.label
+  }, "Target URL"), /*#__PURE__*/React.createElement("input", {
+    style: S.input,
+    placeholder: window.location.href,
+    value: url,
+    onChange: e => setUrl(e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: "0.6rem",
+      marginBottom: "0.75rem"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: S.label
+  }, "Concurrent"), /*#__PURE__*/React.createElement("select", {
+    style: S.sel,
+    value: conc,
+    onChange: e => setConc(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "5"
+  }, "5 users"), /*#__PURE__*/React.createElement("option", {
+    value: "10"
+  }, "10 users"), /*#__PURE__*/React.createElement("option", {
+    value: "25"
+  }, "25 users"), /*#__PURE__*/React.createElement("option", {
+    value: "50"
+  }, "50 users"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: S.label
+  }, "Duration"), /*#__PURE__*/React.createElement("select", {
+    style: S.sel,
+    value: dur,
+    onChange: e => setDur(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "10"
+  }, "10 sec"), /*#__PURE__*/React.createElement("option", {
+    value: "30"
+  }, "30 sec"), /*#__PURE__*/React.createElement("option", {
+    value: "60"
+  }, "60 sec")))), /*#__PURE__*/React.createElement("button", {
+    style: S.run(running),
+    onClick: run
+  }, running ? "⏹ Stop" : "▶ Run Test"), metrics && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: "0.4rem",
+      marginBottom: "0.4rem"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.metric
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.mlbl
+  }, "Requests"), /*#__PURE__*/React.createElement("div", {
+    style: S.mval
+  }, metrics.total)), /*#__PURE__*/React.createElement("div", {
+    style: S.metric
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.mlbl
+  }, "Req / s"), /*#__PURE__*/React.createElement("div", {
+    style: S.mval
+  }, metrics.rps)), /*#__PURE__*/React.createElement("div", {
+    style: S.metric
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.mlbl
+  }, "Avg Latency"), /*#__PURE__*/React.createElement("div", {
+    style: S.mval
+  }, metrics.avg)), /*#__PURE__*/React.createElement("div", {
+    style: S.metric
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.mlbl
+  }, "P95 Latency"), /*#__PURE__*/React.createElement("div", {
+    style: S.mval
+  }, metrics.p95))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      marginBottom: "0.5rem"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "0.56rem",
+      textTransform: "uppercase",
+      letterSpacing: "0.12em",
+      color: "#504840"
+    }
+  }, "Error Rate"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "0.72rem",
+      color: "#C94040",
+      fontWeight: 500
+    }
+  }, metrics.err)), /*#__PURE__*/React.createElement("canvas", {
+    ref: canvasRef,
+    style: {
+      width: "100%",
+      height: "76px",
+      display: "block"
+    }
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: "0.54rem",
+      color: "#3a3530",
+      textAlign: "center",
+      marginTop: "0.35rem"
+    }
+  }, "ms: <100 \xB7 <250 \xB7 <500 \xB7 <1s \xB7 >1s"))));
+}
+
+/* ── NamePrompt ───────────────────────────────────────────────────────────── */
+function NamePrompt({ onSave }) {
+  const [name, setName] = useState("");
+  return React.createElement("div", { className: "wl-name-overlay" },
+    React.createElement("div", { className: "wl-name-box" },
+      React.createElement("p", { className: "wl-eye", style:{ marginBottom:"0.5rem" } }, "Welcome"),
+      React.createElement("h2", { style:{ fontFamily:"'Cormorant Garamond',serif", fontSize:"1.9rem", fontWeight:300, color:"#F0E8D2", marginBottom:"0.5rem" } }, "What's your name?"),
+      React.createElement("p", { style:{ fontSize:"0.78rem", color:"#857A68", lineHeight:1.7, marginBottom:"1.5rem" } }, "We'll use this to save your personal journey map so your dots persist between visits."),
+      React.createElement("input", {
+        className: "wl-name-input",
+        type: "text",
+        placeholder: "Your name",
+        value: name,
+        autoFocus: true,
+        onChange: e => setName(e.target.value),
+        onKeyDown: e => e.key === "Enter" && name.trim() && onSave(name.trim())
+      }),
+      React.createElement("button", {
+        className: "wl-btn-p",
+        style: { width:"100%", opacity: name.trim() ? 1 : 0.5 },
+        onClick: () => name.trim() && onSave(name.trim())
+      }, "Start My Journey →")
+    )
+  );
+}
+
+/* ── JourneySection ───────────────────────────────────────────────────────── */
+function JourneySection({ journey, userName, onReorder, onTogglePublic }) {
+  const countries = [...new Set(journey.map(j => (j.country || "").trim().toLowerCase()).filter(Boolean))].length;
+  const cities = [...new Set(journey.map(j => (j.city || "").split(",")[0].trim().toLowerCase()).filter(Boolean))].length;
+  const dragIdx = useRef(null);
+  const [dragOver, setDragOver] = useState(null);
+
+  const fmtDate = d => {
+    if (!d) return "Date unknown";
+    const dt = new Date(d + "T00:00:00");
+    return dt.toLocaleDateString("en-GB", { day:"numeric", month:"long", year:"numeric" });
+  };
+
+  const onDragStart = i => { dragIdx.current = i; };
+  const onDragOver = (e, i) => { e.preventDefault(); setDragOver(i); };
+  const onDrop = (e, i) => {
+    e.preventDefault();
+    if (dragIdx.current === null || dragIdx.current === i) { setDragOver(null); return; }
+    const updated = [...journey];
+    const [moved] = updated.splice(dragIdx.current, 1);
+    updated.splice(i, 0, moved);
+    onReorder(updated);
+    dragIdx.current = null;
+    setDragOver(null);
+  };
+  const onDragEnd = () => { dragIdx.current = null; setDragOver(null); };
+
+  return React.createElement("div", { className: "wl-journey" },
+    React.createElement("p", { className: "wl-section-eye" }, `${userName}'s journey`),
+    React.createElement("div", { className: "wl-journey-stats" },
+      React.createElement("div", null,
+        React.createElement("div", { className: "wl-jstat-num" }, journey.length),
+        React.createElement("div", { className: "wl-jstat-lbl" }, "Photos")),
+      React.createElement("div", null,
+        React.createElement("div", { className: "wl-jstat-num" }, cities),
+        React.createElement("div", { className: "wl-jstat-lbl" }, "Cities")),
+      React.createElement("div", null,
+        React.createElement("div", { className: "wl-jstat-num" }, countries),
+        React.createElement("div", { className: "wl-jstat-lbl" }, "Countries"))
+    ),
+    journey.length === 0
+      ? React.createElement("p", { style:{ fontFamily:"'Cormorant Garamond',serif", fontSize:"1rem", color:"#484038", fontStyle:"italic" } }, "Upload your first photo to start your journey.")
+      : React.createElement("div", { className: "wl-journey-list" },
+          React.createElement("p", { className: "wl-journey-hint" }, "Drag cards to reorder"),
+          journey.map((stop, i) => React.createElement("div", {
+            key: i,
+            className: `wl-jcard${dragOver === i ? " wl-jcard-over" : ""}`,
+            draggable: true,
+            onDragStart: () => onDragStart(i),
+            onDragOver: e => onDragOver(e, i),
+            onDrop: e => onDrop(e, i),
+            onDragEnd: onDragEnd
+          },
+            stop.thumbnail
+              ? React.createElement("img", { src: stop.thumbnail, className: "wl-jcard-img", alt: stop.city })
+              : React.createElement("div", { className: "wl-jcard-img wl-jcard-nophoto" }),
+            React.createElement("div", { className: "wl-jcard-info" },
+              React.createElement("div", null,
+                React.createElement("div", { className: "wl-jcard-date" }, fmtDate(stop.userDate)),
+                React.createElement("div", { className: "wl-jcard-city" }, stop.city),
+                React.createElement("div", { className: "wl-jcard-country" }, stop.country)
+              ),
+              React.createElement("button", {
+                className: `wl-jcard-pub${stop.isPublic ? " wl-jcard-pub-on" : ""}`,
+                onClick: e => { e.stopPropagation(); onTogglePublic(i); }
+              }, stop.isPublic ? "Public" : "Private")
+            ),
+            React.createElement("div", { className: "wl-jcard-fact" },
+              stop.funFact && React.createElement("p", null, stop.funFact)
+            ),
+            React.createElement("div", { className: "wl-jcard-grip" }, "⠿")
+          ))
+        )
+  );
+}
+
+/* ── App ──────────────────────────────────────────────────────────────────── */
+function WanderLens() {
+  const [page, setPage] = useState("home");
+  const [selectedDest, setSelectedDest] = useState(null);
+  const [photos, setPhotos] = useState({
+    thailand: [], vietnam: [], japan: [], korea: [], taiwan: [], hongkong: [],
+    china: [], singapore: [], malaysia: [], indonesia: [], philippines: [], cambodia: [], india: []
+  });
+  const [lightbox, setLightbox] = useState(null);
+  const [world, setWorld] = useState(null);
+  const [userName, setUserName] = useState(() => localStorage.getItem("wl_user_name") || "");
+  const userNameRef = useRef(userName);
+  useEffect(() => { userNameRef.current = userName; }, [userName]);
+  const [journey, setJourney] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("wl_journey") || "[]"); } catch { return []; }
+  });
+
+  // Load journey from RDS when userName is set
+  useEffect(() => {
+    if (!userName) return;
+    apiLoadJourney(userName).then(rows => {
+      if (rows && rows.length > 0) {
+        setJourney(rows);
+        try { localStorage.setItem("wl_journey", JSON.stringify(rows)); } catch(_) {}
+      }
+    });
+  }, [userName]);
+  const topoReady = useTopoReady();
+  useEffect(() => {
+    if (!topoReady) return;
+    fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json").then(r => r.json()).then(setWorld).catch(e => console.warn("World atlas failed:", e));
+  }, [topoReady]);
+  const handleTogglePublic = useCallback(index => {
+    setJourney(prev => {
+      const updated = prev.map((e, i) => i === index ? { ...e, isPublic: !e.isPublic } : e);
+      try { localStorage.setItem("wl_journey", JSON.stringify(updated)); } catch(_) {}
+      const entry = updated[index];
+      if (entry.id) apiTogglePublic(entry.id, entry.isPublic);
+      return updated;
+    });
+  }, []);
+  const handleJourneyReorder = useCallback(updated => {
+    try { localStorage.setItem("wl_journey", JSON.stringify(updated)); } catch(_) {}
+    setJourney(updated);
+    const order = updated.map((e, i) => ({ id: e.id, sortOrder: i })).filter(e => e.id);
+    if (order.length) apiReorder(userNameRef.current, order);
+  }, []);
+  const handleSaveName = useCallback(name => {
+    localStorage.setItem("wl_user_name", name);
+    setUserName(name);
+  }, []);
+  const handlePhotoAdded = useCallback(async ({
+    destId, dataURL, city, country, lat, lng, funFact, userDate, isPublic
+  }) => {
+    setPhotos(prev => ({
+      ...prev,
+      [destId]: [...prev[destId], { dataURL, city, country, funFact }]
+    }));
+    let finalLat = lat != null ? lat : null;
+    let finalLng = lng != null ? lng : null;
+    if (finalLat == null || finalLng == null) {
+      try {
+        const raw = await callClaude({
+          max_tokens: 80,
+          messages: [{ role: "user", content: `What are the GPS coordinates of ${city}, ${country}? Reply ONLY with JSON, no explanation: {"lat":LATITUDE_NUMBER,"lng":LONGITUDE_NUMBER}` }]
+        });
+        const parsed = JSON.parse(raw.match(/\{[\s\S]*?\}/)?.[0] || "{}");
+        if (typeof parsed.lat === "number") finalLat = parsed.lat;
+        if (typeof parsed.lng === "number") finalLng = parsed.lng;
+      } catch (_) {}
+    }
+    if (finalLat == null || finalLng == null) {
+      const centre = COUNTRY_CENTERS[destId];
+      if (centre) { finalLat = centre.lat; finalLng = centre.lng; }
+    }
+    const thumbnail = await resizeToThumbnail(dataURL).catch(() => null);
+    // Save to RDS (fire and forget, localStorage is the fallback)
+    const dbId = await apiSaveEntry({
+      userName: userNameRef.current, city, country,
+      lat: finalLat, lng: finalLng, funFact,
+      userDate: userDate || null, thumbnail,
+      isPublic: !!isPublic, sortOrder: 0
+    });
+    setJourney(prev => {
+      const entry = { id: dbId, city, country, lat: finalLat, lng: finalLng, funFact, userDate: userDate || null, thumbnail, uploadedAt: new Date().toISOString(), isPublic: !!isPublic, userName: userNameRef.current };
+      // dated entries go in chronological order, undated ones at a random position
+      let updated;
+      if (userDate) {
+        updated = [...prev, entry].sort((a, b) => {
+          if (!a.userDate && !b.userDate) return 0;
+          if (!a.userDate) return 1;
+          if (!b.userDate) return -1;
+          return new Date(a.userDate) - new Date(b.userDate);
+        });
+      } else {
+        const datedEntries = prev.filter(e => e.userDate);
+        const undatedEntries = prev.filter(e => !e.userDate);
+        const insertAt = Math.floor(Math.random() * (undatedEntries.length + 1));
+        undatedEntries.splice(insertAt, 0, entry);
+        updated = [...datedEntries, ...undatedEntries].sort((a, b) => {
+          if (!a.userDate && !b.userDate) return 0;
+          if (!a.userDate) return 1;
+          if (!b.userDate) return -1;
+          return new Date(a.userDate) - new Date(b.userDate);
+        });
+      }
+      try { localStorage.setItem("wl_journey", JSON.stringify(updated)); } catch(_) {}
+      return updated;
+    });
+    setSelectedDest(destId);
+    setPage("gallery");
+  }, []);
+  const openLightbox = useCallback((photo, accent) => setLightbox({
+    photo,
+    accent
+  }), []);
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("style", null, CSS), /*#__PURE__*/React.createElement("div", {
+    className: "wl"
+  }, !userName && React.createElement(NamePrompt, { onSave: handleSaveName }),
+  lightbox && /*#__PURE__*/React.createElement(Lightbox, {
+    photo: lightbox.photo,
+    accent: lightbox.accent,
+    onClose: closeLightbox
+  }), /*#__PURE__*/React.createElement(NavBar, {
+    page: page,
+    onHome: () => setPage("home"),
+    onUpload: () => setPage("upload")
+  }), page === "home" && /*#__PURE__*/React.createElement(HomePage, {
+    photos: photos,
+    world: world,
+    journey: journey,
+    userName: userName,
+    onReorder: handleJourneyReorder,
+    onTogglePublic: handleTogglePublic,
+    onSelectDest: id => {
+      setSelectedDest(id);
+      setPage("gallery");
+    },
+    onUpload: () => setPage("upload"),
+    onOpenLightbox: openLightbox
+  }), page === "gallery" && selectedDest && /*#__PURE__*/React.createElement(GalleryPage, {
+    destId: selectedDest,
+    photos: photos,
+    onOpenLightbox: openLightbox
+  }), page === "upload" && /*#__PURE__*/React.createElement(UploadPage, {
+    onPhotoAdded: handlePhotoAdded
+  }), /*#__PURE__*/React.createElement(StressTester, null)));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(WanderLens));
+</script>
+
+</body>
+</html>
